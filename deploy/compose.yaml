@@ -1,0 +1,72 @@
+name: lumina-gallery
+
+services:
+  lumina:
+    image: ${LUMINA_IMAGE:?Please use scripts/lumina.sh to install a release}
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3210"
+      DATA_DIR: "/app/data"
+      ALLOWED_HOSTS: ${LUMINA_DOMAIN:?A public domain is required}
+      TRUSTED_PROXIES: ${LUMINA_PROXY_IP:-172.30.91.2}
+    volumes:
+      - type: bind
+        source: ${LUMINA_DATA_DIR:?A persistent data directory is required}
+        target: /app/data
+    # Only the HTTPS proxy can reach the backend; no host port is published.
+    networks:
+      - gallery
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    stop_grace_period: 45s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  caddy:
+    image: caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    environment:
+      LUMINA_DOMAIN: ${LUMINA_DOMAIN:?A public domain is required}
+      ACME_EMAIL: ${ACME_EMAIL:?An ACME contact email is required}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${LUMINA_CONFIG_DIR:?A persistent configuration directory is required}/caddy-data:/data
+      - ${LUMINA_CONFIG_DIR:?A persistent configuration directory is required}/caddy-config:/config
+    networks:
+      gallery:
+        ipv4_address: ${LUMINA_PROXY_IP:-172.30.91.2}
+    depends_on:
+      lumina:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+networks:
+  gallery:
+    ipam:
+      config:
+        - subnet: ${LUMINA_PROXY_SUBNET:-172.30.91.0/29}

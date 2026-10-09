@@ -1,0 +1,163 @@
+name: Test and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Tests, build, and source package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install the locked dependencies
+        run: |
+          npm install --global pnpm@11.19.0
+          pnpm install --frozen-lockfile
+      - name: Check tag, types, tests, and frontend build
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_REF_TYPE" == tag ]]; then
+            node --input-type=module -e "import {readFileSync} from 'node:fs'; import {assertVersion} from './scripts/package-release.mjs'; const version=JSON.parse(readFileSync('package.json')).version; assertVersion(version); if (process.env.RELEASE_TAG !== 'v'+version) throw new Error('Tag must match package.json version');"
+          fi
+          pnpm run build
+          pnpm test
+          node --test scripts/package-release.test.mjs
+          bash -n scripts/lumina.sh
+          bash scripts/lumina.test.sh
+      - name: Package only allowlisted public source
+        run: node scripts/package-release.mjs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source-release
+          path: releases/*-source.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  images:
+    name: Build and boot Linux ${{ matrix.arch }}
+    needs: validate
+    if: startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source-release
+          path: releases
+      - name: Build the exact source release
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+          tar -xzf "releases/lumina-gallery-$version-source.tar.gz"
+          source="lumina-gallery-$version"
+          docker build --pull --platform "linux/$RELEASE_ARCH" --tag "lumina-gallery:$version" "$source"
+          mkdir -p "$RUNNER_TEMP/lumina-data" "$RUNNER_TEMP/lumina-config"
+          LUMINA_IMAGE="lumina-gallery:$version" LUMINA_DOMAIN=gallery.example.test ACME_EMAIL=admin@example.test LUMINA_DATA_DIR="$RUNNER_TEMP/lumina-data" LUMINA_CONFIG_DIR="$RUNNER_TEMP/lumina-config" docker compose -f "$source/deploy/compose.yaml" config --quiet
+          caddy_image=$(LUMINA_IMAGE="lumina-gallery:$version" LUMINA_DOMAIN=gallery.example.test ACME_EMAIL=admin@example.test LUMINA_DATA_DIR="$RUNNER_TEMP/lumina-data" LUMINA_CONFIG_DIR="$RUNNER_TEMP/lumina-config" docker compose -f "$source/deploy/compose.yaml" config --images | grep '^caddy:')
+          docker run --rm --entrypoint caddy -e LUMINA_DOMAIN=gallery.example.test -e ACME_EMAIL=admin@example.test -v "$PWD/$source/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" "$caddy_image" validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Verify the image boots with production restrictions
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          container=$(docker run --detach --read-only --tmpfs /tmp:size=64m --tmpfs /app/data:uid=1000,gid=1000,size=64m --cap-drop ALL --security-opt no-new-privileges --pids-limit 256 -e ALLOWED_HOSTS=gallery.example.test "lumina-gallery:$version")
+          trap 'docker rm --force --volumes "$container" >/dev/null' EXIT
+          docker exec -i "$container" node --input-type=module < "lumina-gallery-$version/scripts/smoke-container.mjs"
+      - name: Save the verified Docker image
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          docker save "lumina-gallery:$version" | gzip -n > "releases/lumina-gallery-$version-linux-$RELEASE_ARCH.tar.gz"
+          gzip -t "releases/lumina-gallery-$version-linux-$RELEASE_ARCH.tar.gz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.arch }}
+          path: releases/*-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish tested release assets
+    needs: [validate, images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: releases
+          merge-multiple: true
+      - name: Verify all release assets and write checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          for suffix in source linux-amd64 linux-arm64; do
+            test -s "releases/lumina-gallery-$version-$suffix.tar.gz"
+            gzip -t "releases/lumina-gallery-$version-$suffix.tar.gz"
+          done
+          node scripts/package-release.mjs --checksums-only "$version"
+          (cd releases && sha256sum --check SHA256SUMS)
+      - name: Upload to a draft, then publish the complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          if gh release view "$RELEASE_TAG" --json isDraft > "$RUNNER_TEMP/release-state.json" 2>/dev/null; then
+            node --input-type=module -e "import {readFileSync} from 'node:fs'; if (!JSON.parse(readFileSync(process.argv[1])).isDraft) throw new Error('An already published release will not be overwritten');" "$RUNNER_TEMP/release-state.json"
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "Lumina Gallery $RELEASE_TAG" --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" "releases/lumina-gallery-$version-source.tar.gz" "releases/lumina-gallery-$version-linux-amd64.tar.gz" "releases/lumina-gallery-$version-linux-arm64.tar.gz" releases/SHA256SUMS --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --latest

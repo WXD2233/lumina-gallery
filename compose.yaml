@@ -1,0 +1,19 @@
+services:
+  lumina:
+    build: .
+    ports:
+      - "127.0.0.1:3210:3210"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3210"
+      DATA_DIR: "/app/data"
+      ALLOWED_HOSTS: "${ALLOWED_HOSTS:-}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"

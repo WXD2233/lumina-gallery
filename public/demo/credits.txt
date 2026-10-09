@@ -1,0 +1,7 @@
+Demo photos from Unsplash. Images are bundled locally for the optional demo gallery.
+lake: https://images.unsplash.com/photo-1470770841072-f978cf4d019e
+mountains: https://images.unsplash.com/photo-1469474968028-56623f02e42e
+city: https://images.unsplash.com/photo-1519608487953-e999c86e7455
+forest: https://images.unsplash.com/photo-1448375240586-882707db888b
+desert: https://images.unsplash.com/photo-1509316785289-025f5b846b35
+coast: https://images.unsplash.com/photo-1476514525535-07fb3b4ae5f1

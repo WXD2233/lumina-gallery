@@ -1,0 +1,26 @@
+{
+    email {$ACME_EMAIL}
+    admin off
+}
+
+http://{$LUMINA_DOMAIN} {
+    @navigation method GET HEAD
+    handle @navigation {
+        redir https://{$LUMINA_DOMAIN}{uri} 308
+    }
+    handle {
+        respond "Use HTTPS to access this gallery." 403
+    }
+}
+
+https://{$LUMINA_DOMAIN} {
+    encode zstd gzip
+    reverse_proxy lumina:3210 {
+        header_up Host {host}
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-For {remote_host}
+        header_up -Forwarded
+        header_up -X-Real-IP
+    }
+}
